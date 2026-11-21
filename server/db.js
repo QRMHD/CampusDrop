@@ -4,19 +4,44 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'campusdrop.db');
 
-// Ensure database directory exists (useful for container volumes e.g. /app/data)
-const dbDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+// Resolve DB path: on Vercel / serverless runtimes, root filesystem is read-only; /tmp is the only writable directory.
+function getInitialDbPath() {
+  if (process.env.DB_PATH) {
+    return process.env.DB_PATH;
+  }
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    return '/tmp/campusdrop.db';
+  }
+  return path.join(__dirname, 'campusdrop.db');
 }
 
-const db = new Database(DB_PATH);
+let activeDbPath = getInitialDbPath();
 
-// WAL mode for better concurrent read performance
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+function openDatabase(targetPath) {
+  const dbDir = path.dirname(targetPath);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+
+  const instance = new Database(targetPath);
+  try {
+    instance.pragma('journal_mode = WAL');
+  } catch (err) {
+    console.warn(`WAL mode failed (${err.message}), falling back to default journal mode`);
+  }
+  instance.pragma('foreign_keys = ON');
+  return instance;
+}
+
+let db;
+try {
+  db = openDatabase(activeDbPath);
+} catch (err) {
+  console.warn(`Could not open database at ${activeDbPath} (${err.message}). Falling back to /tmp/campusdrop.db`);
+  activeDbPath = '/tmp/campusdrop.db';
+  db = openDatabase(activeDbPath);
+}
 
 // ─── Schema ───
 db.exec(`

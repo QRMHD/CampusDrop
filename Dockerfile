@@ -30,8 +30,8 @@ WORKDIR /app
 
 # Set container environment
 ENV NODE_ENV=production
-ENV PORT=8080
-ENV DB_PATH=/app/data/campusdrop.db
+ENV PORT=80
+ENV DB_PATH=/tmp/campusdrop.db
 
 # Copy production dependencies (including compiled better-sqlite3) from builder
 COPY --from=builder /app/node_modules ./node_modules
@@ -43,14 +43,11 @@ COPY --from=builder /app/dist ./dist
 # Copy backend server code
 COPY server/ ./server/
 
-# Create a persistent data directory owned by the non-root node user
-RUN mkdir -p /app/data && chown -R node:node /app
+# Ensure /tmp directory is present with full permissions
+RUN mkdir -p /tmp && chmod 777 /tmp
 
-# Run as non-root user (Cloud Run & container security standard)
-USER node
-
-# Document port (Cloud Run & Vercel Containers set process.env.PORT dynamically)
-EXPOSE 8080
+# Document port (Vercel routes to 80 by default; Cloud Run injects PORT=8080)
+EXPOSE 80
 
 # Start production server
 CMD ["node", "server/index.js"]

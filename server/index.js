@@ -10,8 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distPath = path.resolve(__dirname, '../dist');
 
 const app = express();
-// Cloud Run injects process.env.PORT (default 8080); fallback to 3001 for local dev
-const PORT = parseInt(process.env.PORT || '3001', 10);
+// Cloud Run injects process.env.PORT (default 8080); Vercel defaults to 80; fallback to 3001 for local dev
+const PORT = parseInt(process.env.PORT || (process.env.NODE_ENV === 'production' ? '80' : '3001'), 10);
 
 app.use(cors());
 
