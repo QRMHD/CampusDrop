@@ -1,5 +1,5 @@
 # ─── Stage 1: Build frontend SPA & compile dependencies ───
-FROM node:20-slim AS builder
+FROM node:22-slim AS builder
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ─── Stage 2: Production runtime image ───
-FROM node:20-slim AS runner
+FROM node:22-slim AS runner
 
 WORKDIR /app
 
