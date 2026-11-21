@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import db from './db.js';
+import supabase from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distPath = path.resolve(__dirname, '../dist');
@@ -31,14 +31,17 @@ app.use((req, res, next) => {
 });
 
 // ─── Health check endpoint (for Cloud Run / Kubernetes / load balancers) ───
-app.get('/api/health', (_req, res) => {
+app.get('/api/health', async (_req, res) => {
   try {
-    const isDbAlive = db.prepare('SELECT 1 AS ok').get();
+    const { count, error } = await supabase
+      .from('resources')
+      .select('*', { count: 'exact', head: true });
+
     res.json({
-      status: 'ok',
+      status: error ? 'degraded' : 'ok',
       uptime: process.uptime(),
       timestamp: Date.now(),
-      db: isDbAlive?.ok === 1 ? 'connected' : 'unhealthy',
+      db: error ? `error: ${error.message}` : 'connected',
     });
   } catch (err) {
     res.status(503).json({ status: 'error', error: err.message });
@@ -108,54 +111,38 @@ function validateResource(body, partial = false) {
   return Object.keys(errors).length > 0 ? errors : null;
 }
 
-// ─── Prepared statements ───
-const stmts = {
-  getAll:     db.prepare('SELECT * FROM resources ORDER BY created_at DESC'),
-  getById:    db.prepare('SELECT * FROM resources WHERE id = ?'),
-  insert:     db.prepare(`
-    INSERT INTO resources (id, title, course, week, category, notes, link, snippet, created_at)
-    VALUES (@id, @title, @course, @week, @category, @notes, @link, @snippet, @created_at)
-  `),
-  update:     db.prepare(`
-    UPDATE resources
-    SET title = @title, course = @course, week = @week, category = @category,
-        notes = @notes, link = @link, snippet = @snippet
-    WHERE id = @id
-  `),
-  delete:     db.prepare('DELETE FROM resources WHERE id = ?'),
-  search:     db.prepare(`
-    SELECT * FROM resources
-    WHERE title LIKE @q OR course LIKE @q OR notes LIKE @q OR snippet LIKE @q
-    ORDER BY created_at DESC
-  `),
-  weeks:      db.prepare('SELECT DISTINCT week FROM resources ORDER BY week'),
-  courses:    db.prepare('SELECT DISTINCT course FROM resources ORDER BY course'),
-};
-
 // ─── GET /api/resources ───
-app.get('/api/resources', (req, res) => {
+app.get('/api/resources', async (req, res) => {
   try {
     const { q, category, week } = req.query;
-    let results;
+
+    let query = supabase
+      .from('resources')
+      .select('*')
+      .order('created_at', { ascending: false });
 
     if (q && q.trim()) {
-      const escaped = q.trim().replace(/[%_]/g, '\\$&');
-      results = stmts.search.all({ q: `%${escaped}%` });
-    } else {
-      results = stmts.getAll.all();
+      const term = `%${q.trim()}%`;
+      query = query.or(
+        `title.ilike.${term},course.ilike.${term},notes.ilike.${term},snippet.ilike.${term}`
+      );
     }
 
     if (category && category !== 'All') {
       if (!VALID_CATEGORIES.includes(category)) {
         return res.status(400).json({ error: 'Invalid category filter', field: 'category' });
       }
-      results = results.filter(r => r.category === category);
-    }
-    if (week && week !== 'All') {
-      results = results.filter(r => r.week === week);
+      query = query.eq('category', category);
     }
 
-    res.json(results);
+    if (week && week !== 'All') {
+      query = query.eq('week', week);
+    }
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    res.json(data);
   } catch (err) {
     console.error('GET /api/resources error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -163,10 +150,16 @@ app.get('/api/resources', (req, res) => {
 });
 
 // ─── GET /api/resources/meta ───
-app.get('/api/resources/meta', (_req, res) => {
+app.get('/api/resources/meta', async (_req, res) => {
   try {
-    const weeks = stmts.weeks.all().map(r => r.week);
-    const courses = stmts.courses.all().map(r => r.course);
+    const { data, error } = await supabase
+      .from('resources')
+      .select('week, course');
+
+    if (error) throw error;
+
+    const weeks = [...new Set(data.map(r => r.week))].sort();
+    const courses = [...new Set(data.map(r => r.course))].sort();
     res.json({ weeks, courses });
   } catch (err) {
     console.error('GET /api/resources/meta error:', err);
@@ -175,13 +168,18 @@ app.get('/api/resources/meta', (_req, res) => {
 });
 
 // ─── GET /api/resources/:id ───
-app.get('/api/resources/:id', (req, res) => {
+app.get('/api/resources/:id', async (req, res) => {
   try {
-    const resource = stmts.getById.get(req.params.id);
-    if (!resource) {
+    const { data, error } = await supabase
+      .from('resources')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (error || !data) {
       return res.status(404).json({ error: 'Resource not found' });
     }
-    res.json(resource);
+    res.json(data);
   } catch (err) {
     console.error('GET /api/resources/:id error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -189,7 +187,7 @@ app.get('/api/resources/:id', (req, res) => {
 });
 
 // ─── POST /api/resources ───
-app.post('/api/resources', (req, res) => {
+app.post('/api/resources', async (req, res) => {
   try {
     const fieldErrors = validateResource(req.body);
     if (fieldErrors) {
@@ -208,8 +206,15 @@ app.post('/api/resources', (req, res) => {
       created_at: Date.now(),
     };
 
-    stmts.insert.run(resource);
-    res.status(201).json(resource);
+    const { data, error } = await supabase
+      .from('resources')
+      .insert(resource)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.status(201).json(data);
   } catch (err) {
     console.error('POST /api/resources error:', err);
     res.status(500).json({ error: 'Failed to create resource' });
@@ -217,10 +222,16 @@ app.post('/api/resources', (req, res) => {
 });
 
 // ─── PUT /api/resources/:id ───
-app.put('/api/resources/:id', (req, res) => {
+app.put('/api/resources/:id', async (req, res) => {
   try {
-    const existing = stmts.getById.get(req.params.id);
-    if (!existing) {
+    // Check if resource exists
+    const { data: existing, error: fetchError } = await supabase
+      .from('resources')
+      .select('*')
+      .eq('id', req.params.id)
+      .single();
+
+    if (fetchError || !existing) {
       return res.status(404).json({ error: 'Resource not found' });
     }
 
@@ -230,7 +241,6 @@ app.put('/api/resources/:id', (req, res) => {
     }
 
     const updated = {
-      id: req.params.id,
       title:    sanitize(req.body.title    ?? existing.title),
       course:   sanitize(req.body.course   ?? existing.course),
       week:     req.body.week              ?? existing.week,
@@ -240,8 +250,16 @@ app.put('/api/resources/:id', (req, res) => {
       snippet:  sanitize(req.body.snippet  ?? existing.snippet),
     };
 
-    stmts.update.run(updated);
-    res.json({ ...existing, ...updated });
+    const { data, error } = await supabase
+      .from('resources')
+      .update(updated)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json(data);
   } catch (err) {
     console.error('PUT /api/resources/:id error:', err);
     res.status(500).json({ error: 'Failed to update resource' });
@@ -249,10 +267,17 @@ app.put('/api/resources/:id', (req, res) => {
 });
 
 // ─── DELETE /api/resources/:id ───
-app.delete('/api/resources/:id', (req, res) => {
+app.delete('/api/resources/:id', async (req, res) => {
   try {
-    const result = stmts.delete.run(req.params.id);
-    if (result.changes === 0) {
+    const { data, error } = await supabase
+      .from('resources')
+      .delete()
+      .eq('id', req.params.id)
+      .select();
+
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
       return res.status(404).json({ error: 'Resource not found' });
     }
     res.json({ deleted: true });
@@ -306,12 +331,6 @@ function gracefulShutdown(signal) {
   console.log(`\n[${signal}] Initiating graceful shutdown...`);
   server.close(() => {
     console.log('HTTP server closed.');
-    try {
-      db.close();
-      console.log('SQLite database connection closed cleanly.');
-    } catch (e) {
-      console.error('Error closing database:', e);
-    }
     process.exit(0);
   });
 
