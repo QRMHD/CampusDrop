@@ -1,7 +1,7 @@
 # 📚 CampusDrop
 
 > A crisp, modern academic dashboard designed for students and lecturers to organize lab notes, cloud checklists, and study resources week-by-week and topic-by-topic.
-
+Demo Video https://drive.google.com/file/d/1yO1e6-eZXB1WwyQrHCuVW4beWZd2AOx5/view?usp=drive_link 
 ---
 
 ## ✨ Features
